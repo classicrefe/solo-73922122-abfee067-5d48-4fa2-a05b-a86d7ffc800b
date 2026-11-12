@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>镜像 SUID / SGID 审计</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="brand-mark" aria-hidden="true">
+        <span class="brand-dot"></span>
+        <span class="brand-ring"></span>
+      </div>
+      <div class="hero-copy">
+        <p class="eyebrow">Docker Image Privilege Audit</p>
+        <h1>镜像 SUID / SGID 审计</h1>
+        <p class="lede">
+          上传 <code>docker save</code> 导出的单镜像 tar。按 <code>manifest.json</code>
+          的 <code>Layers</code> 顺序只读合并文件元数据，定位最终仍保留高权限位的普通文件。
+        </p>
+        <div class="hero-points" aria-label="安全特性">
+          <span>不落盘解包</span>
+          <span>不跟随符号链接</span>
+          <span>拒绝越界路径</span>
+          <span>精确到写入层</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel upload-panel" aria-labelledby="upload-title">
+      <div class="panel-heading">
+        <div>
+          <p class="section-kicker">01 · 输入</p>
+          <h2 id="upload-title">选择镜像归档</h2>
+        </div>
+        <button type="button" class="button button-ghost" id="demo-button">
+          扫描内置多层示例
+        </button>
+      </div>
+
+      <form id="scan-form" novalidate>
+        <label class="drop-zone" id="drop-zone" for="archive-input">
+          <input id="archive-input" name="archive" type="file"
+                 accept=".tar,application/x-tar,application/octet-stream" hidden>
+          <span class="drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="34" height="34" role="img">
+              <path d="M12 16V4m0 0-4 4m4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"
+                    fill="none" stroke="currentColor" stroke-width="1.7"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="drop-title" id="drop-title">拖拽 tar 到这里，或点击选择文件</span>
+          <span class="drop-hint" id="drop-hint">单镜像 docker save tar · 内容仅在内存中解析</span>
+        </label>
+
+        <div class="actions">
+          <span class="file-pill" id="file-pill" hidden></span>
+          <button type="submit" class="button button-primary" id="scan-button" disabled>
+            <span class="button-label">开始扫描</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+          <a class="button button-link" href="/api/demo/archive" download>
+            下载示例 tar
+          </a>
+        </div>
+      </form>
+
+      <div class="status-box" id="status-box" hidden role="status" aria-live="polite"></div>
+      <div class="error-box" id="error-box" hidden role="alert">
+        <div class="error-heading">
+          <span class="error-icon" aria-hidden="true">!</span>
+          <strong id="error-code">扫描失败</strong>
+        </div>
+        <p id="error-message"></p>
+        <p class="error-meta" id="error-meta" hidden></p>
+      </div>
+    </section>
+
+    <section class="results" id="results" hidden aria-labelledby="results-title">
+      <div class="panel result-head">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">02 · 结果</p>
+            <h2 id="results-title">最终保留特权位的普通文件</h2>
+            <p class="result-subtitle" id="result-subtitle"></p>
+          </div>
+          <div class="summary-cards" aria-label="统计">
+            <div class="metric"><span>扫描层数</span><strong id="metric-layers">0</strong></div>
+            <div class="metric"><span>特权文件</span><strong id="metric-files">0</strong></div>
+            <div class="metric metric-suid"><span>SUID</span><strong id="metric-suid">0</strong></div>
+            <div class="metric metric-sgid"><span>SGID</span><strong id="metric-sgid">0</strong></div>
+          </div>
+        </div>
+        <p class="safety-note" id="safety-note" hidden></p>
+      </div>
+
+      <div class="panel layers-panel">
+        <div class="layers-title-row">
+          <h3>层顺序</h3>
+          <span class="muted">按 manifest.json 的 Layers 数组</span>
+        </div>
+        <ol class="layer-strip" id="layer-strip"></ol>
+      </div>
+
+      <div class="panel table-panel">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">文件路径</th>
+                <th scope="col">八进制权限</th>
+                <th scope="col">特殊位</th>
+                <th scope="col">UID / GID</th>
+                <th scope="col">最后写入层</th>
+              </tr>
+            </thead>
+            <tbody id="findings-body"></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="empty-state" hidden>
+          <span class="empty-check" aria-hidden="true">✓</span>
+          <h3>未发现 SUID / SGID 普通文件</h3>
+          <p>最终合并视图中没有保留高权限位的普通文件。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>只读取 tar 头与层内元数据；不会调用解包，也不会将层内容写入宿主文件系统。</p>
+    <p>白名单之外的路径、硬链接和不安全的层引用会被明确拒绝。</p>
+  </footer>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
