@@ -8,6 +8,13 @@ services:
       - "${APP_PORT:-8000}:8000"
     environment:
       TMPDIR: /tmp
+      SCAN_TMP_DIR: /tmp
+      # Two shared compute slots for upload scans and the built-in demo.
+      SCAN_MAX_SLOTS: "2"
+      # A scan that does not finish within 3s of acquiring a slot is killed.
+      SCAN_TIMEOUT_SECONDS: "3"
+      # Diagnostic hook (0 = disabled). Set e.g. "10" to demo timeouts.
+      SCAN_WORKER_DELAY_SECONDS: "0"
     read_only: true
     tmpfs:
       - "/tmp:size=${UPLOAD_TMP_SIZE:-512m},mode=1777"

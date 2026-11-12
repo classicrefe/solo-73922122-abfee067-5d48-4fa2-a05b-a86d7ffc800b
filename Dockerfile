@@ -19,4 +19,6 @@ USER app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Exactly one web process.  Scan work happens in short-lived worker
+# subprocesses spawned by the app, not in additional uvicorn workers.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

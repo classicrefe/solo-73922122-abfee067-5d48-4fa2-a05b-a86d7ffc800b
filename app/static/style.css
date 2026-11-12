@@ -238,6 +238,23 @@ h2 {
 
 .button-ghost:hover { background: #ece5ff; }
 
+.button-cancel {
+  color: #fff;
+  background: var(--danger);
+  border: 1px solid #b02a38;
+  box-shadow: 0 8px 22px rgba(199, 53, 69, 0.22);
+}
+
+.button-cancel:hover {
+  background: #b02a38;
+  box-shadow: 0 10px 26px rgba(199, 53, 69, 0.3);
+}
+
+.drop-zone.is-locked {
+  pointer-events: none;
+  opacity: 0.65;
+}
+
 .button-link {
   color: var(--ink-soft);
   background: var(--surface-soft);

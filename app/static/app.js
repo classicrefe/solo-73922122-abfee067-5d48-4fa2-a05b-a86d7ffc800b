@@ -9,6 +9,7 @@ const dropTitle = byId("drop-title");
 const dropHint = byId("drop-hint");
 const filePill = byId("file-pill");
 const scanButton = byId("scan-button");
+const cancelButton = byId("cancel-button");
 const demoButton = byId("demo-button");
 const statusBox = byId("status-box");
 const errorBox = byId("error-box");
@@ -29,6 +30,8 @@ const emptyState = byId("empty-state");
 
 let selectedFile = null;
 let busy = false;
+let currentAbort = null;
+let cancelledByUser = false;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -81,35 +84,13 @@ function setError(error) {
   errorBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
-function describeHttpDetail(payload) {
-  const detail = payload && payload.detail;
-  if (!detail) {
-    return { code: "request_failed", message: "服务返回了无法识别的响应。" };
-  }
-  if (typeof detail === "string") {
-    return { code: "request_failed", message: detail };
-  }
-  if (Array.isArray(detail)) {
-    const messages = detail.map((item) => item && (item.msg || item.message)).filter(Boolean);
-    return {
-      code: "validation_error",
-      message: messages.join("；") || "请求参数无效。",
-    };
-  }
-  return {
-    code: detail.code || "request_failed",
-    message: detail.message || "请求失败。",
-    path: detail.path,
-    layer_number: detail.layer_number,
-    layer_path: detail.layer_path,
-  };
-}
-
 function setBusy(nextBusy, label) {
   busy = nextBusy;
   scanButton.classList.toggle("is-busy", nextBusy);
   scanButton.disabled = nextBusy || !selectedFile;
   demoButton.disabled = nextBusy;
+  cancelButton.hidden = !nextBusy;
+  dropZone.classList.toggle("is-locked", nextBusy);
   if (nextBusy) {
     const text = el("span", "button-label", label || "扫描中");
     const spinner = el("span", "spinner");
@@ -122,6 +103,18 @@ function setBusy(nextBusy, label) {
     spinner.setAttribute("aria-hidden", "true");
     scanButton.replaceChildren(text, spinner);
     scanButton.classList.remove("is-busy");
+  }
+}
+
+function clearResults() {
+  results.hidden = true;
+  layerStrip.replaceChildren();
+  findingsBody.replaceChildren();
+  tableWrap.hidden = true;
+  emptyState.hidden = true;
+  resultSubtitle.textContent = "";
+  for (const metric of [metricLayers, metricFiles, metricSuid, metricSgid]) {
+    metric.textContent = "0";
   }
 }
 
@@ -150,22 +143,6 @@ function chooseFile(file) {
     document.createTextNode(` · ${formatBytes(selectedFile.size)}`)
   );
   scanButton.disabled = false;
-}
-
-async function parseResponse(response) {
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch (_error) {
-    payload = null;
-  }
-  if (!response.ok) {
-    throw describeHttpDetail(payload);
-  }
-  if (!payload) {
-    throw { code: "invalid_response", message: "服务没有返回有效 JSON。" };
-  }
-  return payload;
 }
 
 function makeLayerChip(layer) {
@@ -259,35 +236,120 @@ function renderResult(payload) {
   results.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function describeHttpError(response, payload) {
+  const detail = payload && payload.detail;
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    return {
+      code: detail.code || `http_${response.status}`,
+      message: detail.message || `请求失败（HTTP ${response.status}）。`,
+      path: detail.path,
+      layer_number: detail.layer_number,
+      layer_path: detail.layer_path,
+    };
+  }
+  if (typeof detail === "string") {
+    return { code: `http_${response.status}`, message: detail };
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => item && (item.msg || item.message)).filter(Boolean);
+    return {
+      code: "validation_error",
+      message: messages.join("；") || "请求参数无效。",
+    };
+  }
+  const fallback = {
+    503: { code: "capacity_full", message: "计算名额已满（仅 2 个并发扫描），请稍后再试。" },
+    504: { code: "scan_timeout", message: "扫描超过 3 秒未完成，服务已终止该计算进程。" },
+  };
+  return fallback[response.status] || {
+    code: `http_${response.status}`,
+    message: `请求失败（HTTP ${response.status}）。`,
+  };
+}
+
 async function runScan({ file, demo }) {
   if (busy) return;
+  // A failed, cancelled or timed-out run must never leave a stale list on
+  // screen: clear any previous result before starting.
   setError(null);
+  clearResults();
   setBusy(true, demo ? "构建并扫描示例" : "扫描并合并层");
-  setStatus(demo ? "正在内存中构建四层示例归档并合并…" : "正在读取 tar 头并合并 whiteout 规则…");
+  setStatus(
+    demo
+      ? "正在独立子进程中构建四层示例归档并合并…"
+      : "正在独立子进程中读取 tar 头并合并 whiteout 规则…"
+  );
+
+  const controller = new AbortController();
+  currentAbort = controller;
+  cancelledByUser = false;
 
   try {
     let response;
     if (demo) {
-      response = await fetch("/api/demo", { method: "GET", headers: { Accept: "application/json" } });
+      response = await fetch("/api/demo", {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
     } else {
       const formData = new FormData();
       formData.append("archive", file, file.name);
-      response = await fetch("/api/scan", { method: "POST", body: formData, headers: { Accept: "application/json" } });
+      response = await fetch("/api/scan", {
+        method: "POST",
+        body: formData,
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
     }
-    const payload = await parseResponse(response);
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_error) {
+      payload = null;
+    }
+    if (!response.ok) {
+      throw describeHttpError(response, payload);
+    }
+    if (!payload) {
+      throw { code: "invalid_response", message: "服务没有返回有效 JSON。" };
+    }
     renderResult(payload);
     setStatus("");
   } catch (error) {
     setStatus("");
-    if (error && typeof error === "object" && "message" in error) {
+    clearResults();
+    if (error && error.name === "AbortError") {
+      if (cancelledByUser) {
+        setError({ code: "scan_cancelled", message: "扫描已取消，对应计算进程已被服务终止。" });
+      } else {
+        setError({ code: "connection_lost", message: "连接已断开，服务已终止本次扫描。" });
+      }
+    } else if (error && typeof error === "object" && "message" in error) {
       setError(error);
     } else {
       setError({ code: "network_error", message: "网络请求失败，请确认服务正在运行。" });
     }
   } finally {
+    currentAbort = null;
     setBusy(false);
   }
 }
+
+function cancelCurrentScan() {
+  if (currentAbort && busy) {
+    cancelledByUser = true;
+    currentAbort.abort();
+    setStatus("正在取消扫描并终止计算进程…");
+  }
+}
+
+cancelButton.addEventListener("click", cancelCurrentScan);
+
+window.addEventListener("pagehide", () => {
+  if (currentAbort && busy) currentAbort.abort();
+});
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
